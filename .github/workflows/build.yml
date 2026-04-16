@@ -17,6 +17,8 @@ jobs:
       ANDROID_API_LEVEL: "34"
       ANDROID_BUILD_TOOLS: "34.0.0"
       SENTRY_DISABLE_AUTO_UPLOAD: "true"
+      GRADLE_OPTS: >-
+        -Dorg.gradle.jvmargs=-Xmx4g -Dkotlin.daemon.jvm.options=-Xmx2g
 
     steps:
       - name: Checkout CI repo
@@ -24,10 +26,9 @@ jobs:
 
       - name: Clone source app repo
         run: |
-          git clone --depth 1 --branch development --single-branch \
+          git clone --depth 1 --branch development_old --single-branch \
           https://x-access-token:${{ secrets.SOURCE_REPO_TOKEN }}@github.com/${{ secrets.SOURCE_REPO }}.git "$APP_DIR"
 
-      # Node + npm cache
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -35,18 +36,15 @@ jobs:
           cache: npm
           cache-dependency-path: ${{ env.APP_DIR }}/package-lock.json
 
-      # Java
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: ${{ env.JAVA_VERSION }}
 
-      # Gradle cache (BIG speed boost)
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      # Android SDK
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
 
@@ -58,22 +56,24 @@ jobs:
             "platforms;android-${ANDROID_API_LEVEL}" \
             "build-tools;${ANDROID_BUILD_TOOLS}"
 
-      # Install JS deps
       - name: Install dependencies
         working-directory: ${{ env.APP_DIR }}
         run: npm ci
 
-      # Generate native project (no Expo servers)
       - name: Expo prebuild
         working-directory: ${{ env.APP_DIR }}
         run: npx expo prebuild --platform android
 
-      # Build APK
       - name: Build release APK
         working-directory: ${{ env.APP_DIR }}/android
-        run: ./gradlew assembleRelease --stacktrace
+        run: |
+          ./gradlew assembleRelease \
+            --build-cache \
+            --configuration-cache \
+            --configuration-cache-problems=warn \
+            --parallel \
+            --stacktrace
 
-      # Find APK
       - name: Locate APK
         id: apk
         run: |
@@ -85,66 +85,8 @@ jobs:
           echo "path=$APK_PATH" >> "$GITHUB_OUTPUT"
           echo "name=$(basename "$APK_PATH")" >> "$GITHUB_OUTPUT"
 
-      # Upload artifact (backup)
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: android-release-apk
           path: ${{ steps.apk.outputs.path }}
-
-      # Upload to Gofile
-      - name: Upload to Gofile
-        id: gofile
-        run: |
-          RESPONSE=$(curl -sS -X POST "https://upload.gofile.io/uploadfile" \
-            -F "file=@${{ steps.apk.outputs.path }}")
-
-          echo "$RESPONSE" > gofile.json
-
-          python - << 'PY'
-          import json
-          data = json.load(open("gofile.json"))
-
-          url = None
-          if isinstance(data, dict):
-              d = data.get("data", {})
-              url = d.get("downloadPage") or d.get("downloadUrl") or d.get("pageLink")
-
-          if not url:
-              raise SystemExit("No download URL found")
-
-          with open("url.txt", "w") as f:
-              f.write(url)
-          PY
-
-          echo "url=$(cat url.txt)" >> "$GITHUB_OUTPUT"
-
-      # Send to Discord
-      - name: Send Discord notification
-        env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          GOFILE_URL: ${{ steps.gofile.outputs.url }}
-          FILE_NAME: ${{ steps.apk.outputs.name }}
-          BUILD_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          python - << 'PY'
-          import json, os, urllib.request
-
-          payload = {
-              "content": f"Android build ready: {os.environ['FILE_NAME']}",
-              "embeds": [
-                  {
-                      "title": "Build Complete",
-                      "description": f"[Download APK]({os.environ['GOFILE_URL']})\n[Workflow]({os.environ['BUILD_URL']})"
-                  }
-              ]
-          }
-
-          req = urllib.request.Request(
-              os.environ["DISCORD_WEBHOOK_URL"],
-              data=json.dumps(payload).encode(),
-              headers={"Content-Type": "application/json"}
-          )
-
-          urllib.request.urlopen(req)
-          PY
