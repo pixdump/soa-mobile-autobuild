@@ -2,13 +2,11 @@ name: Build Expo Android and send link
 
 on:
   workflow_dispatch:
-  # push:
-  #   branches:
-  #     - main
 
 jobs:
   build-android:
     runs-on: ubuntu-latest
+
     permissions:
       contents: read
 
@@ -18,6 +16,7 @@ jobs:
       NODE_VERSION: "20"
       ANDROID_API_LEVEL: "34"
       ANDROID_BUILD_TOOLS: "34.0.0"
+      SENTRY_DISABLE_AUTO_UPLOAD: "true"
 
     steps:
       - name: Checkout CI repo
@@ -25,8 +24,10 @@ jobs:
 
       - name: Clone source app repo
         run: |
-          git clone --branch development --single-branch \
+          git clone --depth 1 --branch development --single-branch \
           https://x-access-token:${{ secrets.SOURCE_REPO_TOKEN }}@github.com/${{ secrets.SOURCE_REPO }}.git "$APP_DIR"
+
+      # Node + npm cache
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -34,12 +35,18 @@ jobs:
           cache: npm
           cache-dependency-path: ${{ env.APP_DIR }}/package-lock.json
 
+      # Java
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: ${{ env.JAVA_VERSION }}
 
+      # Gradle cache (BIG speed boost)
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # Android SDK
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
 
@@ -51,18 +58,22 @@ jobs:
             "platforms;android-${ANDROID_API_LEVEL}" \
             "build-tools;${ANDROID_BUILD_TOOLS}"
 
+      # Install JS deps
       - name: Install dependencies
         working-directory: ${{ env.APP_DIR }}
         run: npm ci
 
-      - name: Generate native Android project
+      # Generate native project (no Expo servers)
+      - name: Expo prebuild
         working-directory: ${{ env.APP_DIR }}
-        run: npx expo prebuild --platform android --non-interactive
+        run: npx expo prebuild --platform android
 
+      # Build APK
       - name: Build release APK
         working-directory: ${{ env.APP_DIR }}/android
-        run: ./gradlew assembleRelease
+        run: ./gradlew assembleRelease --stacktrace --warning-mode all
 
+      # Find APK
       - name: Locate APK
         id: apk
         run: |
@@ -74,12 +85,14 @@ jobs:
           echo "path=$APK_PATH" >> "$GITHUB_OUTPUT"
           echo "name=$(basename "$APK_PATH")" >> "$GITHUB_OUTPUT"
 
-      - name: Upload artifact to GitHub
+      # Upload artifact (backup)
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: android-release-apk
           path: ${{ steps.apk.outputs.path }}
 
+      # Upload to Gofile
       - name: Upload to Gofile
         id: gofile
         run: |
@@ -87,73 +100,52 @@ jobs:
             -H "Authorization: Bearer ${{ secrets.GOFILE_TOKEN }}" \
             -F "file=@${{ steps.apk.outputs.path }}")
 
-          echo "$RESPONSE" > gofile-response.json
+          echo "$RESPONSE" > gofile.json
 
-          python - <<'PY'
+          python - << 'PY'
           import json
-          data = json.load(open("gofile-response.json"))
+          data = json.load(open("gofile.json"))
 
-          # Adjust these lookups if Gofile changes response shape
-          download = None
+          url = None
           if isinstance(data, dict):
               d = data.get("data", {})
-              download = d.get("downloadPage") or d.get("downloadUrl") or d.get("pageLink")
+              url = d.get("downloadPage") or d.get("downloadUrl") or d.get("pageLink")
 
-          if not download:
-              raise SystemExit("Could not find Gofile download URL in response")
+          if not url:
+              raise SystemExit("No download URL found")
 
-          with open("gofile_url.txt", "w") as f:
-              f.write(download)
+          with open("url.txt", "w") as f:
+              f.write(url)
           PY
 
-          echo "url=$(cat gofile_url.txt)" >> "$GITHUB_OUTPUT"
+          echo "url=$(cat url.txt)" >> "$GITHUB_OUTPUT"
 
+      # Send to Discord
       - name: Send Discord notification
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          GOFILE_URL: ${{ steps.gofile.outputs.url }}
+          FILE_NAME: ${{ steps.apk.outputs.name }}
+          BUILD_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          BUILD_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          GOFILE_URL="${{ steps.gofile.outputs.url }}"
-          FILE_NAME="${{ steps.apk.outputs.name }}"
-
-          python - <<'PY'
-          import json
-          import os
-          import urllib.request
-
-          webhook = os.environ["DISCORD_WEBHOOK_URL"]
-          build_url = os.environ["BUILD_URL"]
-          gofile_url = os.environ["GOFILE_URL"]
-          file_name = os.environ["FILE_NAME"]
-          sha = os.environ["GITHUB_SHA"][:7]
-          ref = os.environ["GITHUB_REF_NAME"]
-          actor = os.environ["GITHUB_ACTOR"]
+          python - << 'PY'
+          import json, os, urllib.request
 
           payload = {
-              "content": f"Android build complete: {file_name}",
+              "content": f"Android build ready: {os.environ['FILE_NAME']}",
               "embeds": [
                   {
-                      "title": "Expo Android build finished",
-                      "description": (
-                          f"Branch: `{ref}`\n"
-                          f"Commit: `{sha}`\n"
-                          f"Actor: `{actor}`\n\n"
-                          f"[Download build]({gofile_url})\n"
-                          f"[Workflow run]({build_url})"
-                      )
+                      "title": "Build Complete",
+                      "description": f"[Download APK]({os.environ['GOFILE_URL']})\n[Workflow]({os.environ['BUILD_URL']})"
                   }
               ]
           }
 
           req = urllib.request.Request(
-              webhook,
-              data=json.dumps(payload).encode("utf-8"),
-              headers={"Content-Type": "application/json"},
-              method="POST",
+              os.environ["DISCORD_WEBHOOK_URL"],
+              data=json.dumps(payload).encode(),
+              headers={"Content-Type": "application/json"}
           )
-          with urllib.request.urlopen(req) as resp:
-              print(resp.status)
+
+          urllib.request.urlopen(req)
           PY
-        env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          BUILD_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          GOFILE_URL: ${{ steps.gofile.outputs.url }}
-          FILE_NAME: ${{ steps.apk.outputs.name }}
