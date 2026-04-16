@@ -71,7 +71,7 @@ jobs:
       # Build APK
       - name: Build release APK
         working-directory: ${{ env.APP_DIR }}/android
-        run: ./gradlew assembleRelease --stacktrace --warning-mode all
+        run: ./gradlew assembleRelease --warning-mode fail
 
       # Find APK
       - name: Locate APK
