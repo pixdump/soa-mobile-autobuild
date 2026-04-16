@@ -71,7 +71,7 @@ jobs:
       # Build APK
       - name: Build release APK
         working-directory: ${{ env.APP_DIR }}/android
-        run: ./gradlew assembleRelease --warning-mode fail
+        run: ./gradlew assembleRelease --stacktrace
 
       # Find APK
       - name: Locate APK
@@ -97,7 +97,6 @@ jobs:
         id: gofile
         run: |
           RESPONSE=$(curl -sS -X POST "https://upload.gofile.io/uploadfile" \
-            -H "Authorization: Bearer ${{ secrets.GOFILE_TOKEN }}" \
             -F "file=@${{ steps.apk.outputs.path }}")
 
           echo "$RESPONSE" > gofile.json
