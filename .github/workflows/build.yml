@@ -2,7 +2,11 @@ name: Build Expo Android and send link
 
 on:
   workflow_dispatch:
-
+    inputs:
+      branch:
+        description: "Branch to build"
+        required: true
+        default: "development"
 jobs:
   build-android:
     runs-on: ubuntu-latest
@@ -22,15 +26,16 @@ jobs:
 
     steps:
       - name: Checkout CI repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Clone source app repo
         run: |
-          git clone --depth 1 --branch development_old --single-branch \
+          BRANCH=${{ github.event.inputs.branch || 'development' }}
+          git clone --depth 1 --branch  "${{ github.event.inputs.branch }}" --single-branch \
           https://x-access-token:${{ secrets.SOURCE_REPO_TOKEN }}@github.com/${{ secrets.SOURCE_REPO }}.git "$APP_DIR"
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
